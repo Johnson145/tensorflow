@@ -704,6 +704,36 @@ class ControlFlowTest(test.TestCase):
       r = control_flow_ops.while_loop(c, b, [n], parallel_iterations=20)
       self.assertEqual(10000, r.eval())
 
+  def testWhileExternalControlDependencies(self):
+    with self.test_session():
+      v = variables.Variable(0.0)
+      v.initializer.run()
+      increment = v.assign_add(1.0)
+
+      def body_fn(i):
+        with ops.control_dependencies([increment]):
+          return i + i
+
+      result = control_flow_ops.while_loop(cond=lambda i: i < 1,
+                                           body=body_fn, loop_vars=[1])
+      result.eval()
+      self.assertAllEqual(v.eval(), 1.0)
+
+  def testWhileExternalControlDependenciesNoInput(self):
+    with self.test_session():
+      v = variables.Variable(0.0)
+      v.initializer.run()
+      increment = v.assign_add(1.0)
+
+      def body_fn(unused_i):
+        with ops.control_dependencies([increment]):
+          return constant_op.constant(5, name="five")
+
+      result = control_flow_ops.while_loop(cond=lambda i: i < 5,
+                                           body=body_fn, loop_vars=[0])
+      result.eval()
+      self.assertAllEqual(v.eval(), 1.0)
+
   def testWhileWithRefs_1(self):
     with self.test_session() as sess:
       x = variables.Variable(0)._ref()  # pylint: disable=protected-access
@@ -1809,6 +1839,23 @@ class ControlFlowTest(test.TestCase):
       r = control_flow_ops.while_loop(lambda n: n < 6.0, b1, [n],
                                       [tensor_shape.unknown_shape()])
       self.assertAllClose(9.0, r.eval(feed_dict={x: 1.0}))
+
+  def testCondGradInNestedWhiles(self):
+    def outer_body(i, x):
+      _, x = control_flow_ops.while_loop(
+          lambda j, x: j < 3, inner_body, [0, 0.0])
+      return i + 1, x
+
+    def inner_body(j, x):
+      y = control_flow_ops.cond(math_ops.less(x, 1), lambda: 2 * x, lambda: x)
+      return j + 1, gradients_impl.gradients(y, x)[0]
+
+    i, x = control_flow_ops.while_loop(lambda i, x: i < 3, outer_body, [0, 0.0])
+
+    with self.test_session() as sess:
+      i_val, x_val = sess.run([i, x])
+      self.assertEqual(i_val, 3)
+      self.assertAllClose(x_val, 1.0)
 
   def testWhile_NestedInput(self):
     with self.test_session() as sess:

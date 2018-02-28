@@ -483,6 +483,7 @@ filegroup(
         "//tensorflow/contrib/factorization:all_files",
         "//tensorflow/contrib/factorization/examples:all_files",
         "//tensorflow/contrib/factorization/kernels:all_files",
+        "//tensorflow/contrib/feature_column:all_files",
         "//tensorflow/contrib/ffmpeg:all_files",
         "//tensorflow/contrib/ffmpeg/default:all_files",
         "//tensorflow/contrib/framework:all_files",
@@ -542,7 +543,6 @@ filegroup(
         "//tensorflow/contrib/model_pruning:all_files",
         "//tensorflow/contrib/model_pruning/examples/cifar10:all_files",
         "//tensorflow/contrib/nccl:all_files",
-        "//tensorflow/contrib/ndlstm:all_files",
         "//tensorflow/contrib/nearest_neighbor:all_files",
         "//tensorflow/contrib/nn:all_files",
         "//tensorflow/contrib/opt:all_files",
@@ -787,6 +787,7 @@ tf_cc_shared_object(
     }),
     deps = [
         "//tensorflow/c:c_api",
+        "//tensorflow/c:c_api_experimental",
         "//tensorflow/c:exported_symbols.lds",
         "//tensorflow/c:version_script.lds",
         "//tensorflow/c/eager:c_api",
