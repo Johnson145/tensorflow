@@ -24,12 +24,18 @@ limitations under the License.
 #include <cstdlib>
 #include <string>
 #include "tensorflow/core/common_runtime/bfc_allocator.h"
-#include "tensorflow/core/framework/visitable_allocator.h"
+#include "tensorflow/core/common_runtime/visitable_allocator.h"
 #include "tensorflow/core/lib/strings/numbers.h"
 #include "tensorflow/core/lib/strings/str_util.h"
 #include "tensorflow/core/platform/mem.h"
 
+#ifndef DO_NOT_USE_ML
 #include "i_malloc.h"
+#endif
+
+#ifdef _WIN32
+typedef unsigned int uint;
+#endif
 
 namespace tensorflow {
 
@@ -53,7 +59,7 @@ class MklCPUAllocator : public VisitableAllocator {
   static constexpr const char* kMaxLimitStr = "TF_MKL_ALLOC_MAX_BYTES";
 
   /// Default upper limit on allocator size - 64GB
-  static const size_t kDefaultMaxLimit = 64LL << 30;
+  static constexpr size_t kDefaultMaxLimit = 64LL << 30;
 
   MklCPUAllocator() { TF_CHECK_OK(Initialize()); }
 
@@ -93,14 +99,14 @@ class MklCPUAllocator : public VisitableAllocator {
     VLOG(1) << "MklCPUAllocator: Setting max_mem_bytes: " << max_mem_bytes;
     allocator_ = new BFCAllocator(new MklSubAllocator, max_mem_bytes,
                                   kAllowGrowth, kName);
-
+#ifndef DO_NOT_USE_ML
     // For redirecting all allocations from MKL to this allocator
     // From: http://software.intel.com/en-us/node/528565
     i_malloc = MallocHook;
     i_calloc = CallocHook;
     i_realloc = ReallocHook;
     i_free = FreeHook;
-
+#endif
     return Status::OK();
   }
 
@@ -158,7 +164,7 @@ class MklCPUAllocator : public VisitableAllocator {
   static constexpr const char* kName = "mklcpu";
 
   /// The alignment that we need for the allocations
-  static const size_t kAlignment = 64;
+  static constexpr const size_t kAlignment = 64;
 
   VisitableAllocator* allocator_;  // owned by this class
 };

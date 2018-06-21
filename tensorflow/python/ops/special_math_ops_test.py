@@ -29,6 +29,7 @@ from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
 from tensorflow.python.ops import special_math_ops
 from tensorflow.python.platform import test
+from tensorflow.python.platform import tf_logging
 
 
 class LBetaTest(test.TestCase):
@@ -150,6 +151,33 @@ class LBetaTest(test.TestCase):
         self.assertEqual(expected_result.get_shape(), lbeta_x.get_shape())
 
 
+class BesselTest(test.TestCase):
+
+  def test_bessel_i0(self):
+    x_single = np.arange(-3, 3).reshape(1, 3, 2).astype(np.float32)
+    x_double = np.arange(-3, 3).reshape(1, 3, 2).astype(np.float64)
+    try:
+      from scipy import special  # pylint: disable=g-import-not-at-top
+      self.assertAllClose(special.i0(x_single),
+                          self.evaluate(special_math_ops.bessel_i0(x_single)))
+      self.assertAllClose(special.i0(x_double),
+                          self.evaluate(special_math_ops.bessel_i0(x_double)))
+    except ImportError as e:
+      tf_logging.warn('Cannot test special functions: %s' % str(e))
+
+  def test_bessel_i1(self):
+    x_single = np.arange(-3, 3).reshape(1, 3, 2).astype(np.float32)
+    x_double = np.arange(-3, 3).reshape(1, 3, 2).astype(np.float64)
+    try:
+      from scipy import special  # pylint: disable=g-import-not-at-top
+      self.assertAllClose(special.i1(x_single),
+                          self.evaluate(special_math_ops.bessel_i1(x_single)))
+      self.assertAllClose(special.i1(x_double),
+                          self.evaluate(special_math_ops.bessel_i1(x_double)))
+    except ImportError as e:
+      tf_logging.warn('Cannot test special functions: %s' % str(e))
+
+
 class EinsumTest(test.TestCase):
 
   simple_cases = [
@@ -192,6 +220,15 @@ class EinsumTest(test.TestCase):
       'abc,cba',
       'dba,ead,cad->bce',
       'aef,fbc,dca->bde',
+      'iJ,Jk->ik',
+      'iJ,Ki->JK',
+      'iJk,Jklm->Jk'
+      'ij, jk, kl -> il',
+      'a, ab, abc -> abc',
+      'ab, ab, cd, cd, ef, ef -> ',
+      'abc, bac',
+      'iJ, Ki -> JK',
+      'iJk, Jklm -> Jk'
   ]
 
   long_cases = [
@@ -200,6 +237,8 @@ class EinsumTest(test.TestCase):
       'ea,fb,gc,hd,abcd->efgh',
       'ea,fb,abcd,gc,hd->efgh',
       'abhe,hidj,jgba,hiab,gab',
+      'efc, dbc, acf, fd -> abe',
+      'abhe, hidj, jgba, hiab, gab',
   ]
 
   invalid_cases = [
@@ -208,6 +247,8 @@ class EinsumTest(test.TestCase):
       'ijk ijk',
       'ij.jk->ik',
       'ij...,jk...->ik...',
+      'ij,k ->kji',
+      'ij,k-> kji',
 
       # axis in output that does not exist
       'ij,jk->im',
@@ -268,7 +309,7 @@ class EinsumTest(test.TestCase):
     input_axes, _, _ = axes.partition('->')
 
     for idx in input_axes.split(','):
-      shape = [all_axes[ax] for ax in idx]
+      shape = [all_axes[ax] for ax in idx if ax.isalpha()]
       input_vals.append(np.random.random(shape))
 
     input_tensors = [constant_op.constant(val) for val in input_vals]
@@ -280,8 +321,8 @@ class EinsumTest(test.TestCase):
     correct_value = np.einsum(axes, *input_vals)
 
     err = np.abs(correct_value - output_value).max()
-    print(axes, err)
-    assert err < 1e-8
+    # print(axes, err)
+    self.assertLess(err, 1e-8)
 
   def test_input_is_placeholder(self):
     with ops.Graph().as_default():
@@ -293,8 +334,7 @@ class EinsumTest(test.TestCase):
             m0: [[1, 2, 3]],
             m1: [[2], [1], [1]],
         }
-        np.testing.assert_almost_equal([[7]], sess.run(
-            out, feed_dict=feed_dict))
+        self.assertAllClose([[7]], sess.run(out, feed_dict=feed_dict))
 
     with ops.Graph().as_default():
       m0 = array_ops.placeholder(dtypes.int32, shape=(None, 3))
@@ -305,7 +345,7 @@ class EinsumTest(test.TestCase):
             m0: [[1, 2, 3]],
             m1: [2, 1, 1],
         }
-        np.testing.assert_almost_equal([7], sess.run(out, feed_dict=feed_dict))
+        self.assertAllClose([7], sess.run(out, feed_dict=feed_dict))
 
     # Tests for placeholders which have two or more None values
     with ops.Graph().as_default():
@@ -317,8 +357,7 @@ class EinsumTest(test.TestCase):
             m0: [[[1, 2]]],
             m1: [[3], [2]],
         }
-        np.testing.assert_almost_equal([[[7]]],
-                                       sess.run(out, feed_dict=feed_dict))
+        self.assertAllClose([[[7]]], sess.run(out, feed_dict=feed_dict))
 
     with ops.Graph().as_default():
       m0 = array_ops.placeholder(dtypes.int32, shape=(2, 1))
@@ -329,8 +368,7 @@ class EinsumTest(test.TestCase):
             m0: [[3], [2]],
             m1: [[[1, 2]]],
         }
-        np.testing.assert_almost_equal([[[7]]],
-                                       sess.run(out, feed_dict=feed_dict))
+        self.assertAllClose([[[7]]], sess.run(out, feed_dict=feed_dict))
 
     with ops.Graph().as_default():
       m0 = array_ops.placeholder(dtypes.int32, shape=(None, None, 2))
@@ -341,8 +379,7 @@ class EinsumTest(test.TestCase):
             m0: [[[1, 2]]],
             m1: [3, 2],
         }
-        np.testing.assert_almost_equal([[7]], sess.run(
-            out, feed_dict=feed_dict))
+        self.assertAllClose([[7]], sess.run(out, feed_dict=feed_dict))
 
     with ops.Graph().as_default():
       m0 = array_ops.placeholder(dtypes.int32, shape=(None, 2, None, 2))
@@ -353,8 +390,7 @@ class EinsumTest(test.TestCase):
             m0: [[[[1, 2]], [[2, 1]]]],
             m1: [[3, 2]],
         }
-        np.testing.assert_almost_equal([[[7, 8]]],
-                                       sess.run(out, feed_dict=feed_dict))
+        self.assertAllClose([[[7, 8]]], sess.run(out, feed_dict=feed_dict))
 
 
 if __name__ == '__main__':

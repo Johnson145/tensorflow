@@ -26,6 +26,8 @@ from tensorflow.python.eager import function
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import variable_scope
 from tensorflow.python.platform import tf_logging as logging
+from tensorflow.python.training.checkpointable import base as checkpointable
+from tensorflow.python.training.checkpointable import util as checkpointable_util
 from tensorflow.python.util import tf_contextlib
 from tensorflow.python.util import tf_decorator
 from tensorflow.python.util.deprecation import deprecated
@@ -203,7 +205,7 @@ def make_template_internal(name_,
   if kwargs:
     func_ = tf_decorator.make_decorator(func_, functools.partial(
         func_, **kwargs))
-  if context.in_eager_mode():
+  if context.executing_eagerly():
     if unique_name_ is not None:
       raise ValueError(
           "unique_name_ cannot be used when eager exeuction is enabled.")
@@ -230,7 +232,7 @@ def _skip_common_stack_elements(stacktrace, base_case):
   return stacktrace[-1:]
 
 
-class Template(object):
+class Template(checkpointable.CheckpointableBase):
   """Wrap a function to aid in variable sharing.
 
   Templates are functions that create variables the first time they are called
@@ -299,7 +301,13 @@ class Template(object):
       vars_at_start = len(ops.get_collection(ops.GraphKeys.GLOBAL_VARIABLES))
       trainable_at_start = len(
           ops.get_collection(ops.GraphKeys.TRAINABLE_VARIABLES))
-      result = self._func(*args, **kwargs)
+      if self._variables_created:
+        result = self._func(*args, **kwargs)
+      else:
+        # The first time we run, restore variables if necessary (via
+        # Checkpointable).
+        with checkpointable_util.capture_dependencies(template=self):
+          result = self._func(*args, **kwargs)
 
       if self._variables_created:
         # Variables were previously created, implying this is not the first
@@ -348,8 +356,7 @@ class Template(object):
       # Only reuse variables if they were already created.
       with variable_scope.variable_scope(
           self._variable_scope, reuse=self._variables_created):
-        result = self._call_func(args, kwargs)
-      return result
+        return self._call_func(args, kwargs)
     else:
       # The scope was not created at construction time, so create it here.
       # Subsequent calls should reuse variables.
@@ -357,8 +364,7 @@ class Template(object):
           self._unique_name, self._name,
           custom_getter=self._custom_getter) as vs:
         self._variable_scope = vs
-        result = self._call_func(args, kwargs)
-        return result
+        return self._call_func(args, kwargs)
 
   @property
   def name(self):
@@ -479,7 +485,7 @@ class _EagerTemplateVariableStore(object):
       if self._variable_scope_name is None:
         raise RuntimeError("A variable scope must be set before an "
                            "_EagerTemplateVariableStore object exits.")
-      self._eager_variable_store._store.close_variable_subscopes(  # pylint: disable=protected-access
+      variable_scope.get_variable_scope_store().close_variable_subscopes(
           self._variable_scope_name)
 
   def _variables_in_scope(self, variable_list):
@@ -543,7 +549,7 @@ class EagerTemplate(Template):
     Raises:
       RuntimeError: if eager execution is not enabled.
     """
-    if not context.in_eager_mode():
+    if not context.executing_eagerly():
       raise RuntimeError(
           "{} objects can only be used when eager execution is enabled, use "
           "tf.Template for graph construction".
@@ -563,7 +569,13 @@ class EagerTemplate(Template):
     try:
       vars_at_start = self._template_store.variables()
       trainable_at_start = self._template_store.trainable_variables()
-      result = self._func(*args, **kwargs)
+      if self._variables_created:
+        result = self._func(*args, **kwargs)
+      else:
+        # The first time we run, restore variables if necessary (via
+        # Checkpointable).
+        with checkpointable_util.capture_dependencies(template=self):
+          result = self._func(*args, **kwargs)
 
       if self._variables_created:
         # Variables were previously created, implying this is not the first
@@ -619,8 +631,7 @@ class EagerTemplate(Template):
             self._variable_scope, reuse=variable_scope.AUTO_REUSE)
       with self._variable_scope_context_manager:
         with self._template_store.as_default():
-          result = self._call_func(args, kwargs)
-      return result
+          return self._call_func(args, kwargs)
     else:
       # The scope was not created at construction time, so create it here.
       # Subsequent calls should reuse variables.
@@ -632,8 +643,7 @@ class EagerTemplate(Template):
         # store's variable scope name is unset; set it here.
         self._template_store.set_variable_scope_name(vs.name)
         with self._template_store.as_default():
-          result = self._call_func(args, kwargs)
-        return result
+          return self._call_func(args, kwargs)
 
   @property
   def name(self):

@@ -33,8 +33,7 @@ from tensorflow.python.ops import variable_scope
 from tensorflow.python.ops.losses import losses
 from tensorflow.python.summary import summary
 from tensorflow.python.training import ftrl
-from tensorflow.python.training import training_util
-from tensorflow.python.util.tf_export import tf_export
+from tensorflow.python.util.tf_export import estimator_export
 
 
 # The default learning rate of 0.2 is a historical artifact of the initial
@@ -157,21 +156,15 @@ def _linear_model_fn(features, labels, mode, head, feature_columns, optimizer,
         units=head.logits_dimension, feature_columns=feature_columns)
     logits = logit_fn(features=features)
 
-    def _train_op_fn(loss):
-      """Returns the op to optimize the loss."""
-      return optimizer.minimize(
-          loss,
-          global_step=training_util.get_global_step())
-
     return head.create_estimator_spec(
         features=features,
         mode=mode,
         labels=labels,
-        train_op_fn=_train_op_fn,
+        optimizer=optimizer,
         logits=logits)
 
 
-@tf_export('estimator.LinearClassifier')
+@estimator_export('estimator.LinearClassifier')
 class LinearClassifier(estimator.Estimator):
   """Linear classifier model.
 
@@ -234,7 +227,10 @@ class LinearClassifier(estimator.Estimator):
   Loss is calculated by using softmax cross entropy.
 
   @compatibility(eager)
-  Estimators are not compatible with eager execution.
+  Estimators can be used while eager execution is enabled. Note that `input_fn`
+  and all hooks are executed inside a graph context, so they have to be written
+  to be compatible with graph mode. Note that `input_fn` code using `tf.data`
+  generally works in both graph and eager modes.
   @end_compatibility
   """
 
@@ -324,7 +320,7 @@ class LinearClassifier(estimator.Estimator):
         warm_start_from=warm_start_from)
 
 
-@tf_export('estimator.LinearRegressor')
+@estimator_export('estimator.LinearRegressor')
 class LinearRegressor(estimator.Estimator):
   """An estimator for TensorFlow Linear regression problems.
 
@@ -377,7 +373,10 @@ class LinearRegressor(estimator.Estimator):
   Loss is calculated by using mean squared error.
 
   @compatibility(eager)
-  Estimators are not compatible with eager execution.
+  Estimators can be used while eager execution is enabled. Note that `input_fn`
+  and all hooks are executed inside a graph context, so they have to be written
+  to be compatible with graph mode. Note that `input_fn` code using `tf.data`
+  generally works in both graph and eager modes.
   @end_compatibility
   """
 
@@ -422,7 +421,7 @@ class LinearRegressor(estimator.Estimator):
       loss_reduction: One of `tf.losses.Reduction` except `NONE`. Describes how
         to reduce training loss over batch. Defaults to `SUM`.
     """
-    head = head_lib._regression_head_with_mean_squared_error_loss(  # pylint: disable=protected-access
+    head = head_lib._regression_head(  # pylint: disable=protected-access
         label_dimension=label_dimension, weight_column=weight_column,
         loss_reduction=loss_reduction)
 

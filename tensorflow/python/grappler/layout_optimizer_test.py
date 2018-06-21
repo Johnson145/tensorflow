@@ -150,10 +150,14 @@ def _loop_with_vec_and_4d():
 def _get_config(layout_optimizer=True):
   if layout_optimizer:
     rewrite_options = rewriter_config_pb2.RewriterConfig(
-        layout_optimizer=rewriter_config_pb2.RewriterConfig.ON)
+        layout_optimizer=rewriter_config_pb2.RewriterConfig.ON,
+        # do not remove duplicated nodes
+        arithmetic_optimization=rewriter_config_pb2.RewriterConfig.OFF)
   else:
     rewrite_options = rewriter_config_pb2.RewriterConfig(
-        layout_optimizer=rewriter_config_pb2.RewriterConfig.OFF)
+        layout_optimizer=rewriter_config_pb2.RewriterConfig.OFF,
+        # do not remove duplicated nodes
+        arithmetic_optimization=rewriter_config_pb2.RewriterConfig.OFF)
   graph_options = config_pb2.GraphOptions(
       rewrite_options=rewrite_options, build_cost_model=1)
   config = config_pb2.ConfigProto(graph_options=graph_options)
@@ -321,7 +325,7 @@ class LayoutOptimizerTest(test.TestCase):
       conv = _two_layer_model(x)
       dim = array_ops.placeholder(dtype='int32')
       sizes = constant_op.constant([50, 10, 4], shape=[3])
-      split = gen_array_ops._split_v(
+      split = gen_array_ops.split_v(
           value=conv, size_splits=sizes, axis=dim, num_split=3)
       output = math_ops.reduce_sum(split[0])
 
@@ -476,7 +480,7 @@ class LayoutOptimizerTest(test.TestCase):
       random_seed.set_random_seed(0)
       x = random_ops.truncated_normal([1, 784], seed=0)
       conv = _two_layer_model(x)
-      reduce_sum = math_ops.reduce_sum(conv, axis=[1, 2], keep_dims=True)
+      reduce_sum = math_ops.reduce_sum(conv, axis=[1, 2], keepdims=True)
       squeeze = array_ops.squeeze(reduce_sum, axis=[1, 2])
       output = array_ops.identity(squeeze)
 
@@ -506,7 +510,7 @@ class LayoutOptimizerTest(test.TestCase):
       random_seed.set_random_seed(0)
       x = random_ops.truncated_normal([1, 784], seed=0)
       conv = _two_layer_model(x)
-      reduce_sum = math_ops.reduce_sum(conv, axis=[0, 1, 2], keep_dims=True)
+      reduce_sum = math_ops.reduce_sum(conv, axis=[0, 1, 2], keepdims=True)
       squeeze = array_ops.squeeze(reduce_sum, axis=[0, 1, 2])
       output = array_ops.identity(squeeze)
 
@@ -623,7 +627,7 @@ class LayoutOptimizerTest(test.TestCase):
       random_seed.set_random_seed(0)
       x = random_ops.truncated_normal([1, 784], seed=0)
       conv = _two_layer_model(x)
-      reduce_sum = math_ops.reduce_sum(conv, axis=[3], keep_dims=True)
+      reduce_sum = math_ops.reduce_sum(conv, axis=[3], keepdims=True)
       output = array_ops.identity(reduce_sum)
 
       with session.Session(config=_get_config(False)) as sess:
@@ -653,7 +657,7 @@ class LayoutOptimizerTest(test.TestCase):
       random_seed.set_random_seed(0)
       x = random_ops.truncated_normal([1, 784], seed=0)
       conv = _two_layer_model(x)
-      reduce_sum = math_ops.reduce_sum(conv, axis=[2], keep_dims=True)
+      reduce_sum = math_ops.reduce_sum(conv, axis=[2], keepdims=True)
       output = array_ops.identity(reduce_sum)
 
       with session.Session(config=_get_config(False)) as sess:
@@ -682,7 +686,7 @@ class LayoutOptimizerTest(test.TestCase):
       random_seed.set_random_seed(0)
       x = random_ops.truncated_normal([1, 784], seed=0)
       conv = _two_layer_model(x)
-      reduce_sum = math_ops.reduce_sum(conv, axis=[2, 3], keep_dims=True)
+      reduce_sum = math_ops.reduce_sum(conv, axis=[2, 3], keepdims=True)
       output = array_ops.identity(reduce_sum)
 
       with session.Session(config=_get_config(False)) as sess:
@@ -896,7 +900,7 @@ class LayoutOptimizerTest(test.TestCase):
       add = math_ops.add(conv, conv)
       mean = math_ops.reduce_mean(conv)
       condition = math_ops.less(conv, mean)
-      select = gen_math_ops._select(condition, conv, add)
+      select = gen_math_ops.select(condition, conv, add)
       output = array_ops.identity(select)
 
       with session.Session(config=_get_config(False)) as sess:
@@ -926,7 +930,7 @@ class LayoutOptimizerTest(test.TestCase):
       conv = _two_layer_model(x)
       add = math_ops.add(conv, conv)
       condition = array_ops.placeholder(dtype='bool')
-      select = gen_math_ops._select(condition, conv, add)
+      select = gen_math_ops.select(condition, conv, add)
       output = array_ops.identity(select)
 
       condition_val = np.zeros((1, 7, 7, 64))
@@ -957,7 +961,7 @@ class LayoutOptimizerTest(test.TestCase):
       conv = _two_layer_model(x)
       add = math_ops.add(conv, conv)
       condition = constant_op.constant(True)
-      select = gen_math_ops._select(condition, conv, add)
+      select = gen_math_ops.select(condition, conv, add)
       output = array_ops.identity(select)
 
       with session.Session(config=_get_config(False)) as sess:
@@ -1023,7 +1027,7 @@ class LayoutOptimizerTest(test.TestCase):
       conv = _two_layer_model(x)
       ksize = constant_op.constant([1, 2, 3, 1], shape=[4])
       strides = array_ops.placeholder(dtype='int32', shape=[4])
-      max_pool = gen_nn_ops._max_pool_v2(conv, ksize, strides, 'VALID')
+      max_pool = gen_nn_ops.max_pool_v2(conv, ksize, strides, 'VALID')
       output = array_ops.identity(max_pool)
 
       strides_val = [1, 3, 2, 1]
@@ -1385,7 +1389,7 @@ class LayoutOptimizerTest(test.TestCase):
       expected_num_transposes = 3
       self.assertEqual(expected_num_transposes, num_transposes)
       self._assert_trans_nhwc_to_nchw('map/while/Conv2D-0', nodes)
-      self._assert_trans_nchw_to_nhwc('map/while/Add-0-2', nodes)
+      self._assert_trans_nchw_to_nhwc('map/while/Add_1-0-2', nodes)
       self.assertAllClose(output_val_ref, output_val, atol=1e-3)
 
   def testLoopWithVecAnd4D(self):
@@ -1409,7 +1413,7 @@ class LayoutOptimizerTest(test.TestCase):
       expected_num_transposes = 2
       self.assertEqual(expected_num_transposes, num_transposes)
       self._assert_trans_nhwc_to_nchw('map/while/Conv2D-0', nodes)
-      self._assert_trans_nchw_to_nhwc('map/while/Add-0-2', nodes)
+      self._assert_trans_nchw_to_nhwc('map/while/Add_1-0-2', nodes)
       self.assertAllClose(output_val_ref, output_val, atol=1e-3)
 
   def testBinaryOpSecondPort(self):

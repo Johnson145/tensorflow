@@ -19,7 +19,6 @@ limitations under the License.
 #include <algorithm>
 #include <functional>
 #include <memory>
-#include <queue>
 #include <random>
 #include <unordered_map>
 #include <vector>
@@ -29,6 +28,7 @@ limitations under the License.
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/core/threadpool.h"
+#include "tensorflow/core/platform/byte_order.h"
 #include "tensorflow/core/platform/cpu_info.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/thread_annotations.h"
@@ -44,15 +44,14 @@ template <typename TaskType>
 class ASBSQueue;
 }  // namespace internal
 
-// EXPERIMENTAL: API MAY BE SUBJECTED TO SUDDEN CHANGES.
-//
 // Shared batch scheduler designed to minimize latency. The scheduler keeps
 // track of a number of queues (one per model or model version) which are
 // continuously enqueuing requests. The scheduler groups the requests into
 // batches which it periodically sends off for processing (see
 // shared_batch_scheduler.h for more details). AdaptiveSharedBatchScheduler
-// (ASBS) prioritizes batches by age (i.e. the batch's oldest request)
-// irrespective of queue or batch size.
+// (ASBS) prioritizes batches primarily by age (i.e. the batch's oldest request)
+// along with a configurable preference for scheduling larger batches first.
+//
 //
 // ASBS tries to keep the system busy by maintaining an adjustable number of
 // concurrently processed batches.  If a new batch is created, and the number of
@@ -77,7 +76,7 @@ class AdaptiveSharedBatchScheduler
           AdaptiveSharedBatchScheduler<TaskType>> {
  public:
   ~AdaptiveSharedBatchScheduler() {
-    // Finish processing batches before destorying other class members.
+    // Finish processing batches before destroying other class members.
     batch_thread_pool_.reset();
   }
 
@@ -93,6 +92,16 @@ class AdaptiveSharedBatchScheduler
     // for num_batch_threads allows for large in_flight_batches_limit_, which
     // will harm latency for some time once load increases again.
     int64 num_batch_threads = port::NumSchedulableCPUs();
+    // Lower bound for in_flight_batches_limit_. As discussed above, can be used
+    // to minimize the damage caused by the random walk under low load.
+    int64 min_in_flight_batches_limit = 1;
+    // Although batch selection is primarily based on age, this parameter
+    // specifies a preference for larger batches.  A full batch will be
+    // scheduled before an older, nearly empty batch as long as the age gap is
+    // less than full_batch_scheduling_boost_micros.  The optimal value for this
+    // parameter should be of order the batch processing latency, but must be
+    // chosen carefully, as too large a value will harm tail latency.
+    int64 full_batch_scheduling_boost_micros = 0;
     // The environment to use (typically only overridden by test code).
     Env* env = Env::Default();
     // Initial limit for number of batches being concurrently processed.
@@ -153,17 +162,9 @@ class AdaptiveSharedBatchScheduler
 
   const Options options_;
 
-  struct BatchCompare {
-    bool operator()(const internal::ASBSBatch<TaskType>* a,
-                    const internal::ASBSBatch<TaskType>* b);
-  };
-
   // Collection of batches added by AddBatch, ordered by age. Owned by scheduler
   // until they are released for processing.
-  std::priority_queue<const internal::ASBSBatch<TaskType>*,
-                      std::vector<const internal::ASBSBatch<TaskType>*>,
-                      BatchCompare>
-      batches_ GUARDED_BY(mu_);
+  std::vector<const internal::ASBSBatch<TaskType>*> batches_ GUARDED_BY(mu_);
 
   // Unowned queues and callbacks added by AddQueue.
   std::unordered_map<const internal::ASBSQueue<TaskType>*, BatchProcessor>
@@ -288,6 +289,21 @@ Status AdaptiveSharedBatchScheduler<TaskType>::Create(
     return errors::InvalidArgument("num_batch_threads must be positive; was ",
                                    options.num_batch_threads);
   }
+  if (options.min_in_flight_batches_limit < 1) {
+    return errors::InvalidArgument(
+        "min_in_flight_batches_limit must be >= 1; was ",
+        options.min_in_flight_batches_limit);
+  }
+  if (options.min_in_flight_batches_limit > options.num_batch_threads) {
+    return errors::InvalidArgument(
+        "min_in_flight_batches_limit (", options.min_in_flight_batches_limit,
+        ") must be <= num_batch_threads (", options.num_batch_threads, ")");
+  }
+  if (options.full_batch_scheduling_boost_micros < 0) {
+    return errors::InvalidArgument(
+        "full_batch_scheduling_boost_micros can't be negative; was ",
+        options.full_batch_scheduling_boost_micros);
+  }
   if (options.initial_in_flight_batches_limit > options.num_batch_threads) {
     return errors::InvalidArgument(
         "initial_in_flight_batches_limit (",
@@ -295,11 +311,12 @@ Status AdaptiveSharedBatchScheduler<TaskType>::Create(
         ") should not be larger than num_batch_threads (",
         options.num_batch_threads, ")");
   }
-  if (options.initial_in_flight_batches_limit < 1) {
-    return errors::InvalidArgument(
-        "initial_in_flight_batches_limit should be "
-        "greater than or equal to 1; was ",
-        options.initial_in_flight_batches_limit);
+  if (options.initial_in_flight_batches_limit <
+      options.min_in_flight_batches_limit) {
+    return errors::InvalidArgument("initial_in_flight_batches_limit (",
+                                   options.initial_in_flight_batches_limit,
+                                   "must be >= min_in_flight_batches_limit (",
+                                   options.min_in_flight_batches_limit, ")");
   }
   if (options.batches_to_average_over < 1) {
     return errors::InvalidArgument(
@@ -348,7 +365,7 @@ template <typename TaskType>
 void AdaptiveSharedBatchScheduler<TaskType>::AddBatch(
     const internal::ASBSBatch<TaskType>* batch) {
   mutex_lock l(mu_);
-  batches_.push(batch);
+  batches_.push_back(batch);
   MaybeScheduleNextBatch();
 }
 
@@ -366,10 +383,26 @@ void AdaptiveSharedBatchScheduler<TaskType>::MaybeScheduleNextBatch() {
   // Non-integer limit handled probabilistially.
   if (in_flight_batches_limit_ - in_flight_batches_ < 1 &&
       rand_double_(rand_engine_) >
-          (in_flight_batches_limit_ - in_flight_batches_))
+          in_flight_batches_limit_ - in_flight_batches_) {
     return;
-  const internal::ASBSBatch<TaskType>* batch = batches_.top();
-  batches_.pop();
+  }
+  auto best_it = batches_.begin();
+  double best_score =
+      (*best_it)->creation_time_micros() -
+      options_.full_batch_scheduling_boost_micros * (*best_it)->size() /
+          static_cast<double>((*best_it)->queue()->max_task_size());
+  for (auto it = batches_.begin() + 1; it != batches_.end(); it++) {
+    const double score =
+        (*it)->creation_time_micros() -
+        options_.full_batch_scheduling_boost_micros * (*it)->size() /
+            static_cast<double>((*it)->queue()->max_task_size());
+    if (score < best_score) {
+      best_score = score;
+      best_it = it;
+    }
+  }
+  const internal::ASBSBatch<TaskType>* batch = *best_it;
+  batches_.erase(best_it);
   // Queue may destroy itself after ReleaseBatch is called.
   batch->queue()->ReleaseBatch(batch);
   batch_thread_pool_->Schedule(
@@ -418,20 +451,15 @@ void AdaptiveSharedBatchScheduler<TaskType>::CallbackWrapper(
     in_flight_batches_limit_ =
         std::min(in_flight_batches_limit_,
                  static_cast<double>(options_.num_batch_threads));
-    in_flight_batches_limit_ = std::max(in_flight_batches_limit_, 1.0);
+    in_flight_batches_limit_ =
+        std::max(in_flight_batches_limit_,
+                 static_cast<double>(options_.min_in_flight_batches_limit));
     last_avg_latency_ms_ = current_avg_latency_ms;
     last_latency_decreased_ = current_latency_decreased;
     batch_count_ = 0;
     batch_latency_sum_ = 0;
   }
   MaybeScheduleNextBatch();
-}
-
-template <typename TaskType>
-bool AdaptiveSharedBatchScheduler<TaskType>::BatchCompare::operator()(
-    const internal::ASBSBatch<TaskType>* a,
-    const internal::ASBSBatch<TaskType>* b) {
-  return a->creation_time_micros() > b->creation_time_micros();
 }
 
 // ---------------- ASBSQueue ----------------

@@ -21,21 +21,21 @@ limitations under the License.
 #include "tensorflow/core/framework/tensor_types.h"
 #include "tensorflow/core/util/tensor_format.h"
 
-#include "mkl_dnn.h"
-#include "mkl_dnn_types.h"
-#include "tensorflow/core/util/mkl_util.h"
 
 #ifndef INTEL_MKL_ML
 #include "mkldnn.hpp"
-
 using mkldnn::batch_normalization_backward;
 using mkldnn::batch_normalization_forward;
 using mkldnn::prop_kind;
 using mkldnn::stream;
 using mkldnn::use_global_stats;
 using mkldnn::use_scale_shift;
+#else
+#include "mkl_dnn.h"
+#include "mkl_dnn_types.h"
 #endif
 
+#include "tensorflow/core/util/mkl_util.h"
 // TODO(inteltf) Address comments from PR 8968.
 
 namespace tensorflow {
@@ -262,7 +262,6 @@ class MklFusedBatchNormOp : public OpKernel {
     }
 
     void MklCreateInputLayout(OpKernelContext* context) {
-      const Tensor& input = MklGetInput(context, 0);
       bool input_in_mkl_format = mkl_shape_input_shape.IsMklTensor();
       if (input_in_mkl_format) {
         mkl_lt_input =
@@ -818,8 +817,8 @@ class MklFusedBatchNormOp : public OpKernel {
       // set weights primitive
       // MKL-DNN packs scale & shift as "weights":
       // <scale>...<scale><shift>...<shift>
-      auto weights_desc =
-          memory::desc({2, depth_}, MklDnnType<T>(), memory::format::nc);
+      auto weights_desc = memory::desc({2, static_cast<int>(depth_)},
+                                       MklDnnType<T>(), memory::format::nc);
       auto weights_pd = memory::primitive_desc(weights_desc, cpu_engine);
       auto weights_m = memory(weights_pd);
       T* weights_data = reinterpret_cast<T*>(weights_m.get_data_handle());
@@ -834,8 +833,8 @@ class MklFusedBatchNormOp : public OpKernel {
       }
 
       // set mean primitive
-      auto mean_desc =
-          memory::desc({1, depth_}, MklDnnType<T>(), memory::format::nc);
+      auto mean_desc = memory::desc({1, static_cast<int>(depth_)},
+                                    MklDnnType<T>(), memory::format::nc);
       auto mean_pd = memory::primitive_desc(mean_desc, cpu_engine);
       char* saved_mean_data_tf =
           reinterpret_cast<char*>(saved_mean_tensor->flat<T>().data());
@@ -845,8 +844,8 @@ class MklFusedBatchNormOp : public OpKernel {
           memory(mean_pd, reinterpret_cast<void*>(saved_mean_data_tf));
 
       // set variance primitive
-      auto variance_desc =
-          memory::desc({1, depth_}, MklDnnType<T>(), memory::format::nc);
+      auto variance_desc = memory::desc({1, static_cast<int>(depth_)},
+                                        MklDnnType<T>(), memory::format::nc);
       auto variance_pd = memory::primitive_desc(variance_desc, cpu_engine);
       char* saved_variance_data_tf =
           reinterpret_cast<char*>(saved_variance_tensor->flat<T>().data());
@@ -934,7 +933,7 @@ class MklFusedBatchNormOp : public OpKernel {
   bool is_training_;
   T* mean_values_;
   T* variance_values_;
-  size_t depth_;  // batch normalization is done for per channel.
+  int depth_;  // batch normalization is done for per channel.
 
   void ExtractParams(OpKernelContext* context) {
     const Tensor& input = MklGetInput(context, 0);

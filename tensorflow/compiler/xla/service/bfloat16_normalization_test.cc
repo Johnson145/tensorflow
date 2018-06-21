@@ -19,6 +19,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_module.h"
 #include "tensorflow/compiler/xla/service/hlo_opcode.h"
+#include "tensorflow/compiler/xla/service/hlo_verifier.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/test.h"
 #include "tensorflow/compiler/xla/test_helpers.h"
@@ -41,13 +42,17 @@ class TestBFloat16Support : public BFloat16Support {
         hlo.opcode() == HloOpcode::kGetTupleElement) {
       return true;
     }
+    if (hlo.opcode() == HloOpcode::kDot) {
+      // Test that only the first operand of kDot supports BF16.
+      return operand_index == 0;
+    }
     return false;
   }
 
   bool SupportsBF16Output(const HloInstruction& hlo) const override {
     if (hlo.opcode() == HloOpcode::kAdd || hlo.opcode() == HloOpcode::kReduce ||
         hlo.opcode() == HloOpcode::kSubtract ||
-        hlo.opcode() == HloOpcode::kTuple ||
+        hlo.opcode() == HloOpcode::kDot || hlo.opcode() == HloOpcode::kTuple ||
         hlo.opcode() == HloOpcode::kGetTupleElement) {
       return true;
     }
@@ -70,6 +75,10 @@ class BFloat16NormalizationTest : public HloTestBase {
     BFloat16Normalization normalization(&bfloat16_support_);
     StatusOr<bool> result = normalization.Run(module);
     EXPECT_IS_OK(result.status());
+
+    HloVerifier verifier(/*allow_mixed_precision=*/true);
+    EXPECT_IS_OK(verifier.Run(module).status());
+
     return result.ValueOrDie();
   }
 };
@@ -166,7 +175,7 @@ TEST_F(BFloat16NormalizationTest, ResolveUnsupportedMixedPrecisionReduce) {
   Shape f32_input_shape = ShapeUtil::MakeShape(F32, {2, 4});
   Shape f32_output_shape = ShapeUtil::MakeShape(F32, {4});
 
-  Shape bf16_scalar_shape = ShapeUtil::MakeShape(BF16, {2, 4});
+  Shape bf16_scalar_shape = ShapeUtil::MakeShape(BF16, {});
 
   auto reduce_comp_builder = HloComputation::Builder("reduce_comp");
   auto reduce_comp_param0 = reduce_comp_builder.AddInstruction(
@@ -219,6 +228,17 @@ TEST_F(BFloat16NormalizationTest, ResolveUnsupportedMixedPrecisionReduce) {
 }
 
 TEST_F(BFloat16NormalizationTest, ResolveMixedPrecisionTupleCrossReplicaSum) {
+  auto module = CreateNewModule();
+  HloComputation::Builder sum_builder("sum");
+  auto x = sum_builder.AddInstruction(HloInstruction::CreateParameter(
+      /*parameter_number=*/0, ShapeUtil::MakeShape(F32, {}), "x"));
+  auto y = sum_builder.AddInstruction(HloInstruction::CreateParameter(
+      /*parameter_number=*/1, ShapeUtil::MakeShape(F32, {}), "y"));
+  sum_builder.AddInstruction(HloInstruction::CreateBinary(
+      ShapeUtil::MakeShape(F32, {}), HloOpcode::kAdd, x, y));
+  HloComputation* reduction =
+      module->AddEmbeddedComputation(sum_builder.Build());
+
   auto builder = HloComputation::Builder(TestName());
   Shape f32_shape = ShapeUtil::MakeShape(F32, {2, 4});
   Shape bf16_shape = ShapeUtil::MakeShape(BF16, {2, 4});
@@ -230,11 +250,11 @@ TEST_F(BFloat16NormalizationTest, ResolveMixedPrecisionTupleCrossReplicaSum) {
 
   HloInstruction* crs =
       builder.AddInstruction(HloInstruction::CreateCrossReplicaSum(
-          ShapeUtil::MakeTupleShape({f32_shape, bf16_shape}), {a, b}));
+          ShapeUtil::MakeTupleShape({f32_shape, bf16_shape}), {a, b}, reduction,
+          /*replica_group_ids=*/{}, /*barrier=*/""));
   HloInstruction* gte = builder.AddInstruction(
       HloInstruction::CreateGetTupleElement(bf16_shape, crs, 1));
 
-  auto module = CreateNewModule();
   auto computation = module->AddEntryComputation(builder.Build());
 
   EXPECT_TRUE(Normalize(module.get()));
@@ -243,6 +263,36 @@ TEST_F(BFloat16NormalizationTest, ResolveMixedPrecisionTupleCrossReplicaSum) {
   EXPECT_EQ(gte->shape().element_type(), BF16);
   EXPECT_EQ(crs->operand(1)->shape().element_type(), F32);
   EXPECT_EQ(ShapeUtil::GetSubshape(crs->shape(), {1}).element_type(), F32);
+}
+
+// Tests that the normalization should not cause unsupported mixed precision due
+// to resolving unsupported BF16 operand.
+TEST_F(BFloat16NormalizationTest, DoNotAddUnsupportedMixedPrecision) {
+  auto builder = HloComputation::Builder(TestName());
+  Shape bf16_shape = ShapeUtil::MakeShape(BF16, {4, 4});
+
+  HloInstruction* a = builder.AddInstruction(
+      HloInstruction::CreateParameter(0, bf16_shape, "a"));
+  HloInstruction* b = builder.AddInstruction(
+      HloInstruction::CreateParameter(1, bf16_shape, "b"));
+
+  DotDimensionNumbers dot_dnums;
+  dot_dnums.add_lhs_contracting_dimensions(1);
+  dot_dnums.add_rhs_contracting_dimensions(0);
+  HloInstruction* dot = builder.AddInstruction(
+      HloInstruction::CreateDot(bf16_shape, a, b, dot_dnums));
+
+  auto module = CreateNewModule();
+  auto computation = module->AddEntryComputation(builder.Build());
+
+  EXPECT_TRUE(Normalize(module.get()));
+
+  EXPECT_EQ(computation->root_instruction()->opcode(), HloOpcode::kConvert);
+  EXPECT_EQ(dot->shape().element_type(), F32);
+  EXPECT_EQ(dot->operand(0)->shape().element_type(), F32);
+  EXPECT_EQ(dot->operand(0)->opcode(), HloOpcode::kConvert);
+  EXPECT_EQ(dot->operand(1)->shape().element_type(), F32);
+  EXPECT_EQ(dot->operand(1)->opcode(), HloOpcode::kConvert);
 }
 
 }  // namespace xla

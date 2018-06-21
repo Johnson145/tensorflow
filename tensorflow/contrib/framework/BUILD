@@ -62,6 +62,7 @@ tf_custom_op_py_library(
         "//tensorflow/python:math_ops",
         "//tensorflow/python:platform",
         "//tensorflow/python:pywrap_tensorflow",
+        "//tensorflow/python:resource_variable_ops",
         "//tensorflow/python:script_ops",
         "//tensorflow/python:smart_cond",
         "//tensorflow/python:sparse_tensor",
@@ -92,6 +93,7 @@ tf_kernel_library(
     ],
     deps = [
         "//tensorflow/core:framework",
+        "//tensorflow/core:framework_headers_lib",
         "//third_party/eigen3",
     ],
     alwayslink = 1,
@@ -176,6 +178,8 @@ cuda_py_test(
         "//tensorflow/python:platform_test",
         "//tensorflow/python:resource_variable_ops",
         "//tensorflow/python:tensor_array_ops",
+        "//tensorflow/python/data/ops:dataset_ops",
+        "//tensorflow/python/eager:context",
     ],
 )
 
@@ -319,16 +323,4 @@ py_test(
         "//tensorflow/python:random_ops",
         "//third_party/py/numpy",
     ],
-)
-
-filegroup(
-    name = "all_files",
-    srcs = glob(
-        ["**/*"],
-        exclude = [
-            "**/METADATA",
-            "**/OWNERS",
-        ],
-    ),
-    visibility = ["//tensorflow:__subpackages__"],
 )

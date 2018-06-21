@@ -22,8 +22,6 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 #include <vector>
-#include "mkl_dnn.h"
-#include "mkl_dnn_types.h"
 #include "third_party/eigen3/unsupported/Eigen/CXX11/Tensor"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -31,7 +29,6 @@ limitations under the License.
 #include "tensorflow/core/kernels/bounds_check.h"
 #include "tensorflow/core/kernels/ops_util.h"
 #include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/util/mkl_util.h"
 #include "tensorflow/core/util/tensor_format.h"
 
 #if !defined(IS_MOBILE_PLATFORM)
@@ -45,7 +42,12 @@ using mkldnn::lrn_backward;
 using mkldnn::lrn_forward;
 using mkldnn::prop_kind;
 using mkldnn::stream;
+#else
+#include "mkl_dnn.h"
+#include "mkl_dnn_types.h"
 #endif
+
+#include "tensorflow/core/util/mkl_util.h"
 
 namespace tensorflow {
 
@@ -88,7 +90,8 @@ class MklLRNOp : public OpKernel {
     OP_REQUIRES_OK(context, context->GetAttr("alpha", &alpha_));
     OP_REQUIRES_OK(context, context->GetAttr("beta", &beta_));
     workspace_enabled_ = false;
-    context->GetAttr("workspace_enabled", &workspace_enabled_);
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("workspace_enabled", &workspace_enabled_));
   }
 
   void Compute(OpKernelContext* context) override {
@@ -357,7 +360,8 @@ class MklLRNGradOp : public OpKernel {
     OP_REQUIRES_OK(context, context->GetAttr("alpha", &alpha_));
     OP_REQUIRES_OK(context, context->GetAttr("beta", &beta_));
     workspace_enabled_ = false;
-    context->GetAttr("workspace_enabled", &workspace_enabled_);
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("workspace_enabled", &workspace_enabled_));
   }
 
   void Compute(OpKernelContext* context) override {
@@ -535,7 +539,6 @@ class MklLRNGradOp : public OpKernel {
                                 Tensor* mkl_tmp_outimage_buf_tensor) {
       const Tensor& in_grads = MklGetInput(context, 0);
       const Tensor& in_image = MklGetInput(context, 1);
-      const Tensor& out_image = MklGetInput(context, 2);
       const Tensor& workspace = MklGetInput(
           context,
           3); /*Worskpsace is enabled, get the buffer to the workspace */
@@ -544,8 +547,6 @@ class MklLRNGradOp : public OpKernel {
           static_cast<const void*>(in_grads.flat<T>().data()));
       void* user_fwd_input = const_cast<void*>(
           static_cast<const void*>(in_image.flat<T>().data()));
-      void* user_fwd_output = const_cast<void*>(
-          static_cast<const void*>(out_image.flat<T>().data()));
       void* workspace_buffer = const_cast<void*>(
           static_cast<const void*>(workspace.flat<T>().data()));
 
@@ -753,7 +754,8 @@ class MklLRNOp : public OpKernel {
     OP_REQUIRES_OK(context, context->GetAttr("alpha", &alpha_));
     OP_REQUIRES_OK(context, context->GetAttr("beta", &beta_));
     workspace_enabled_ = false;
-    context->GetAttr("workspace_enabled", &workspace_enabled_);
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("workspace_enabled", &workspace_enabled_));
   }
 
   void Compute(OpKernelContext* context) override {
@@ -1002,7 +1004,8 @@ class MklLRNGradOp : public OpKernel {
     OP_REQUIRES_OK(context, context->GetAttr("alpha", &alpha_));
     OP_REQUIRES_OK(context, context->GetAttr("beta", &beta_));
     workspace_enabled_ = false;
-    context->GetAttr("workspace_enabled", &workspace_enabled_);
+    OP_REQUIRES_OK(context,
+                   context->GetAttr("workspace_enabled", &workspace_enabled_));
   }
 
   void Compute(OpKernelContext* context) override {
@@ -1044,7 +1047,6 @@ class MklLRNGradOp : public OpKernel {
       // Naming: diff_dst is input_gradient_tensor; src is orig_input_tensor.
       const Tensor& input_grad_tensor = MklGetInput(context, kIdxGradient);
       const Tensor& orig_input_tensor = MklGetInput(context, kIdxOrigInput);
-      const Tensor& orig_output_tensor = MklGetInput(context, kIdxOrigOutput);
 
       // Get input sizes in MKL-DNN required NCHW format.
       // LRN does not have data_format attribute. But by default it has
@@ -1236,7 +1238,7 @@ class MklLRNGradOp : public OpKernel {
     auto activations = orig_output_tensor.shaped<T, 2>({nodes * batch, depth});
 
     Tensor* output_dnn_data;
-    MklShape mkl_output_mkl_shape;
+    MklDnnShape mkl_output_mkl_shape;
     mkl_output_mkl_shape.SetMklTensor(false);
     mkl_output_mkl_shape.SetDimensions(4);
     AllocateOutputSetMklShape(context, kIdxOutput, &output_dnn_data,
