@@ -18,9 +18,12 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import time
+
 from absl.testing import parameterized
 import numpy as np
 
+from tensorflow.python.client import session
 from tensorflow.python.data.ops import dataset_ops
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
@@ -79,7 +82,7 @@ class BatchDatasetTest(test.TestCase, parameterized.TestCase):
     self.assertEqual([[dim0] + list(c.shape[1:]) for c in components],
                      [t.shape.as_list() for t in get_next])
 
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       sess.run(
           init_op,
           feed_dict={
@@ -108,7 +111,7 @@ class BatchDatasetTest(test.TestCase, parameterized.TestCase):
     iterator = (dataset_ops.Dataset.range(10).batch(0).make_one_shot_iterator())
     get_next = iterator.get_next()
 
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       with self.assertRaises(errors.InvalidArgumentError):
         sess.run(get_next)
 
@@ -128,7 +131,7 @@ class BatchDatasetTest(test.TestCase, parameterized.TestCase):
     init_op = iterator.initializer
     get_next = iterator.get_next()
 
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       sess.run(init_op)
       for i in range(2):
         actual = sess.run(get_next)
@@ -155,7 +158,7 @@ class BatchDatasetTest(test.TestCase, parameterized.TestCase):
     init_op = iterator.initializer
     get_next = iterator.get_next()
 
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       sess.run(init_op)
       for i in range(2):
         actual = sess.run(get_next)
@@ -185,7 +188,7 @@ class BatchDatasetTest(test.TestCase, parameterized.TestCase):
     init_op = iterator.initializer
     get_next = iterator.get_next()
 
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       sess.run(init_op)
       actual = sess.run(get_next)
       expected = sparse_tensor.SparseTensorValue(
@@ -211,7 +214,7 @@ class BatchDatasetTest(test.TestCase, parameterized.TestCase):
         .make_initializable_iterator())
     next_element = iterator.get_next()
 
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       sess.run(iterator.initializer)
       with self.assertRaisesRegexp(
           errors.InvalidArgumentError,
@@ -259,7 +262,7 @@ class PaddedBatchDatasetTest(test.TestCase, parameterized.TestCase):
     init_op = iterator.initializer
     get_next = iterator.get_next()
 
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       sess.run(
           init_op,
           feed_dict={
@@ -275,7 +278,7 @@ class PaddedBatchDatasetTest(test.TestCase, parameterized.TestCase):
         result = sess.run(get_next)
         padded_len = padded_shapes[0]
         if padded_len is None or padded_len == -1:
-          padded_len = np.max(result)
+          padded_len = np.max(result) if result.size > 0 else 0
         self.assertEqual((batch_size, padded_len), result.shape)
         for j in range(batch_size):
           seq_len = seq_lens[(i * batch_size) + j]
@@ -285,7 +288,7 @@ class PaddedBatchDatasetTest(test.TestCase, parameterized.TestCase):
 
       if not drop_remainder and len(seq_lens) % batch_size > 0:
         result = sess.run(get_next)
-        padded_len = np.max(result)
+        padded_len = np.max(result) if result.size > 0 else 0
         self.assertEqual((len(seq_lens) % batch_size, padded_len),
                          result.shape)
         for j in range(len(seq_lens) % batch_size):
@@ -304,7 +307,7 @@ class PaddedBatchDatasetTest(test.TestCase, parameterized.TestCase):
             batch_size=4, padded_shapes=[5]).make_one_shot_iterator())
     get_next = iterator.get_next()
 
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       with self.assertRaises(errors.DataLossError):
         sess.run(get_next)
 
@@ -315,7 +318,7 @@ class PaddedBatchDatasetTest(test.TestCase, parameterized.TestCase):
             batch_size=4, padded_shapes=[-1]).make_one_shot_iterator())
     get_next = iterator.get_next()
 
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       result = sess.run(get_next)
       self.assertAllEqual([[], [], [], []], result)
       with self.assertRaises(errors.OutOfRangeError):
@@ -339,7 +342,7 @@ class PaddedBatchDatasetTest(test.TestCase, parameterized.TestCase):
     init_op = iterator.initializer
     get_next = iterator.get_next()
 
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       # Test with random sequence lengths, and max padding.
       random_seq_lens = np.random.randint(20, size=(32,)).astype(np.int32)
       sess.run(
@@ -378,7 +381,7 @@ class PaddedBatchDatasetTest(test.TestCase, parameterized.TestCase):
         (tensor_shape.TensorShape([None]), tensor_shape.TensorShape([None])))
     padded_dataset = dataset.padded_batch(
         2, padded_shapes=([None], [None]), padding_values=('', 0))
-    with self.test_session() as sess:
+    with self.cached_session() as sess:
       next_element = padded_dataset.make_one_shot_iterator().get_next()
       sess.run(next_element)
 
@@ -459,6 +462,56 @@ class PaddedBatchDatasetTest(test.TestCase, parameterized.TestCase):
       shape_as_tensor = array_ops.placeholder(dtypes.int64, shape=[2])
       _ = dataset_ops.Dataset.range(10).padded_batch(
           5, padded_shapes=shape_as_tensor)
+
+
+class BatchDatasetBenchmark(test.Benchmark):
+
+  def benchmarkBatchSparse(self):
+    non_zeros_per_row_values = [0, 1, 5, 10, 100]
+    batch_size_values = [1, 32, 64, 128, 1024]
+
+    sparse_placeholder = array_ops.sparse_placeholder(dtype=dtypes.int64)
+    batch_size_placeholder = array_ops.placeholder(dtype=dtypes.int64, shape=[])
+
+    dataset = dataset_ops.Dataset.from_tensors(sparse_placeholder).repeat(
+        ).batch(batch_size_placeholder)
+    iterator = dataset.make_initializable_iterator()
+    next_element = iterator.get_next()
+
+    for non_zeros_per_row in non_zeros_per_row_values:
+
+      sparse_value = sparse_tensor.SparseTensorValue(
+          indices=np.arange(non_zeros_per_row, dtype=np.int64)[:, np.newaxis],
+          values=np.arange(non_zeros_per_row, dtype=np.int64),
+          dense_shape=[1000])
+
+      for batch_size in batch_size_values:
+
+        with session.Session() as sess:
+          sess.run(iterator.initializer, feed_dict={
+              sparse_placeholder: sparse_value,
+              batch_size_placeholder: batch_size})
+          # Run five steps to warm up the session caches before taking the
+          # first measurement.
+          for _ in range(5):
+            sess.run(next_element.indices.op)
+          deltas = []
+          for _ in range(100):
+            start = time.time()
+            for _ in range(100):
+              sess.run(next_element.indices.op)
+            end = time.time()
+            deltas.append(end - start)
+
+        median_wall_time = np.median(deltas) / 100.0
+
+        print('Batch sparse dataset non-zeros per row: %d batch_size: %d '
+              'wall time: %f'
+              % (non_zeros_per_row, batch_size, median_wall_time))
+        self.report_benchmark(
+            iters=10000, wall_time=median_wall_time,
+            name='benchmark_batch_sparse_dataset_nnz_%d_batch_size_%d' % (
+                non_zeros_per_row, batch_size))
 
 
 if __name__ == '__main__':

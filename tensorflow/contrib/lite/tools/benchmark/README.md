@@ -3,7 +3,35 @@
 ## Description
 
 A simple C++ binary to benchmark a TFLite model and its individual operators,
-both on desktop machines and on Android.
+both on desktop machines and on Android. The binary takes a TFLite model,
+generates random inputs and then repeatedly runs the model for specified number
+of runs. Aggregrate latency statistics are reported after running the benchmark.
+
+The instructions below are for running the binary on Desktop and Android,
+for iOS please use the
+[iOS benchmark app](https://github.com/tensorflow/tensorflow/tree/master/tensorflow/contrib/lite/tools/benchmark/ios).
+
+## Parameters
+
+The binary takes the following required parameters:
+
+*   `graph`: `string` \
+    The path to the TFLite model file.
+
+and the following optional parameters:
+
+*   `num_threads`: `int` (default=1) \
+    The number of threads to use for running TFLite interpreter.
+*   `warmup_runs`: `int` (default=1) \
+    The number of warmup runs to do before starting the benchmark.
+*   `num_runs`: `int` (default=50) \
+    The number of runs. Increase this to reduce variance.
+*   `run_delay`: `float` (default=-1.0) \
+    The delay in seconds between subsequent benchmark runs. Non-positive values
+    mean use no delay.
+*   `use_nnapi`: `bool` (default=false) \
+    Whether to use [Android NNAPI](https://developer.android.com/ndk/guides/neuralnetworks/).
+    This API is available on recent Android devices.
 
 ## To build/install/run
 
@@ -44,8 +72,6 @@ adb push mobilenet_quant_v1_224.tflite /data/local/tmp
 ```
 adb shell /data/local/tmp/benchmark_model \
   --graph=/data/local/tmp/mobilenet_quant_v1_224.tflite \
-  --input_layer="Placeholder" \
-  --input_layer_shape="1,224,224,3" \
   --num_threads=4
 ```
 
@@ -62,13 +88,32 @@ For example:
 ```
 bazel-bin/tensorflow/contrib/lite/tools/benchmark/benchmark_model \
   --graph=mobilenet_quant_v1_224.tflite \
-  --input_layer="Placeholder" \
-  --input_layer_shape="1,224,224,3" \
   --num_threads=4
 ```
 
-The MobileNet graph used as an example here may be downloaded from
-https://storage.googleapis.com/download.tensorflow.org/models/tflite/mobilenet_v1_224_android_quant_2017_11_08.zip
+The MobileNet graph used as an example here may be downloaded from [here](https://storage.googleapis.com/download.tensorflow.org/models/tflite/mobilenet_v1_224_android_quant_2017_11_08.zip).
+
+
+## Reducing variance between runs on Android.
+
+Most modern Android phones use [ARM big.LITTLE](https://en.wikipedia.org/wiki/ARM_big.LITTLE)
+architecture where some cores are more power hungry but faster than other cores.
+When running benchmarks on these phones there can be significant variance
+between different runs of the benchmark. One way to reduce variance between runs
+is to set the [CPU affinity](https://en.wikipedia.org/wiki/Processor_affinity)
+before running the benchmark. On Android this can be done using the `taskset`
+command.
+E.g. for running the benchmark on big cores on Pixel 2 with a single thread one
+can use the following command:
+
+```
+adb shell taskset f0 /data/local/tmp/benchmark_model \
+  --graph=/data/local/tmp/mobilenet_quant_v1_224.tflite \
+  --num_threads=1
+```
+
+where `f0` is the affinity mask for big cores on Pixel 2.
+Note: The affinity mask varies with the device.
 
 ## Profiling model operators
 The benchmark model binary also allows you to profile operators and give execution times of each operator. To do this,
@@ -150,5 +195,3 @@ Memory (bytes): count=0
 
 Average inference timings in us: Warmup: 83235, Init: 38467, no stats: 79760.9
 ```
-
-

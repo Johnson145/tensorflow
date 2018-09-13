@@ -23,6 +23,9 @@ limitations under the License.
 #include <unordered_set>
 #include <vector>
 
+#ifdef TFLITE_EXTENDED
+#include "tensorflow/contrib/lite/delegates/eager/delegate.h"
+#endif  // TFLITE_EXTENDED
 #include "tensorflow/contrib/lite/kernels/register.h"
 #include "tensorflow/contrib/lite/model.h"
 #include "tensorflow/contrib/lite/op_resolver.h"
@@ -162,35 +165,60 @@ bool PopulateInputLayerInfo(
   return true;
 }
 
+BenchmarkParams GetDefaultParams() {
+  BenchmarkParams default_params = BenchmarkModel::DefaultParams();
+  default_params.AddParam("graph", BenchmarkParam::Create<std::string>(""));
+  default_params.AddParam("input_layer",
+                          BenchmarkParam::Create<std::string>(""));
+  default_params.AddParam("input_layer_shape",
+                          BenchmarkParam::Create<std::string>(""));
+  default_params.AddParam("use_nnapi", BenchmarkParam::Create<bool>(false));
+  return default_params;
+}
+
 }  // namespace
+
+BenchmarkTfLiteModel::BenchmarkTfLiteModel()
+    : BenchmarkModel(GetDefaultParams()) {
+  AddListener(&profiling_listener_);
+}
+
+BenchmarkTfLiteModel::BenchmarkTfLiteModel(BenchmarkParams params)
+    : BenchmarkModel(std::move(params)) {
+  AddListener(&profiling_listener_);
+}
 
 std::vector<Flag> BenchmarkTfLiteModel::GetFlags() {
   std::vector<Flag> flags = BenchmarkTfLiteModel::BenchmarkModel::GetFlags();
   std::vector<Flag> specific_flags = {
-      Flag("graph", &graph, "graph file name"),
-      Flag("input_layer", &input_layer_string, "input layer names"),
-      Flag("input_layer_shape", &input_layer_shape_string, "input layer shape"),
-      Flag("use_nnapi", &use_nnapi, "use nnapi api")};
+      CreateFlag<std::string>("graph", &params_, "graph file name"),
+      CreateFlag<std::string>("input_layer", &params_, "input layer names"),
+      CreateFlag<std::string>("input_layer_shape", &params_,
+                              "input layer shape"),
+      CreateFlag<bool>("use_nnapi", &params_, "use nnapi api")};
 
   flags.insert(flags.end(), specific_flags.begin(), specific_flags.end());
   return flags;
 }
 
-void BenchmarkTfLiteModel::LogFlags() {
-  BenchmarkModel::LogFlags();
-  TFLITE_LOG(INFO) << "Graph: [" << graph << "]";
-  TFLITE_LOG(INFO) << "Input layers: [" << input_layer_string << "]";
-  TFLITE_LOG(INFO) << "Input shapes: [" << input_layer_shape_string << "]";
-  TFLITE_LOG(INFO) << "Use nnapi : [" << use_nnapi << "]";
+void BenchmarkTfLiteModel::LogParams() {
+  BenchmarkModel::LogParams();
+  TFLITE_LOG(INFO) << "Graph: [" << params_.Get<std::string>("graph") << "]";
+  TFLITE_LOG(INFO) << "Input layers: ["
+                   << params_.Get<std::string>("input_layer") << "]";
+  TFLITE_LOG(INFO) << "Input shapes: ["
+                   << params_.Get<std::string>("input_layer_shape") << "]";
+  TFLITE_LOG(INFO) << "Use nnapi : [" << params_.Get<bool>("use_nnapi") << "]";
 }
 
-bool BenchmarkTfLiteModel::ValidateFlags() {
-  if (graph.empty()) {
+bool BenchmarkTfLiteModel::ValidateParams() {
+  if (params_.Get<std::string>("graph").empty()) {
     TFLITE_LOG(ERROR)
         << "Please specify the name of your TF Lite input file with --graph";
     return false;
   }
-  return PopulateInputLayerInfo(input_layer_string, input_layer_shape_string,
+  return PopulateInputLayerInfo(params_.Get<std::string>("input_layer"),
+                                params_.Get<std::string>("input_layer_shape"),
                                 &inputs);
 }
 
@@ -204,7 +232,48 @@ uint64_t BenchmarkTfLiteModel::ComputeInputBytes() {
   return total_input_bytes;
 }
 
+void BenchmarkTfLiteModel::PrepareInputsAndOutputs() {
+  auto interpreter_inputs = interpreter->inputs();
+  // Set the values of the input tensors.
+  for (int j = 0; j < inputs.size(); ++j) {
+    const InputLayerInfo& input = inputs[j];
+    int i = interpreter_inputs[j];
+    TfLiteTensor* t = interpreter->tensor(i);
+    std::vector<int> sizes = input.shape;
+
+    // TODO(ahentz): below we ignore the O-th dimension (number of batches).
+    if (t->type == kTfLiteFloat32) {
+      FillRandomValue<float>(
+          interpreter->typed_tensor<float>(i),
+          std::vector<int>(sizes.begin() + 1, sizes.end()),
+          []() { return static_cast<float>(rand()) / RAND_MAX - 0.5f; });
+    } else if (t->type == kTfLiteInt32) {
+      // TODO(yunluli): This is currently only used for handling embedding input
+      // for speech models. Generalize if necessary.
+      FillRandomValue<int32_t>(
+          interpreter->typed_tensor<int32_t>(i),
+          std::vector<int32_t>(sizes.begin() + 1, sizes.end()),
+          []() { return static_cast<int32_t>(rand()) % 100; });
+    } else if (t->type == kTfLiteUInt8) {
+      FillRandomValue<uint8_t>(
+          interpreter->typed_tensor<uint8_t>(i),
+          std::vector<int>(sizes.begin() + 1, sizes.end()),
+          []() { return static_cast<uint8_t>(rand()) % 255; });
+    } else if (t->type == kTfLiteString) {
+      tflite::DynamicBuffer buffer;
+      FillRandomString(&buffer, sizes, []() {
+        return "we're have some friends over saturday to hang out in the yard";
+      });
+      buffer.WriteToTensor(interpreter->tensor(i));
+    } else {
+      TFLITE_LOG(FATAL) << "Don't know how to populate tensor " << t->name
+                        << " of type " << t->type;
+    }
+  }
+}
+
 void BenchmarkTfLiteModel::Init() {
+  std::string graph = params_.Get<std::string>("graph");
   model = tflite::FlatBufferModel::BuildFromFile(graph.c_str());
   if (!model) {
     TFLITE_LOG(FATAL) << "Failed to mmap model " << graph;
@@ -226,11 +295,25 @@ void BenchmarkTfLiteModel::Init() {
   }
   profiling_listener_.SetInterpreter(interpreter.get());
 
-  if (params_.num_threads != -1) {
-    interpreter->SetNumThreads(params_.num_threads);
+  const int32_t num_threads = params_.Get<int32_t>("num_threads");
+
+  if (num_threads != -1) {
+    interpreter->SetNumThreads(num_threads);
   }
 
+  bool use_nnapi = params_.Get<bool>("use_nnapi");
+
   interpreter->UseNNAPI(use_nnapi);
+
+#ifdef TFLITE_EXTENDED
+  TFLITE_LOG(INFO) << "Instantiating Eager Delegate";
+  delegate_ = EagerDelegate::Create();
+  if (delegate_) {
+    interpreter->ModifyGraphWithDelegate(delegate_.get(),
+                                         /*allow_dynamic_tensors=*/true);
+  }
+#endif  // TFLITE_EXTENDED
+
   auto interpreter_inputs = interpreter->inputs();
 
   if (!inputs.empty()) {
@@ -261,36 +344,6 @@ void BenchmarkTfLiteModel::Init() {
 
   if (interpreter->AllocateTensors() != kTfLiteOk) {
     TFLITE_LOG(FATAL) << "Failed to allocate tensors!";
-  }
-
-  // Set the values of the input tensors.
-  for (int j = 0; j < inputs.size(); ++j) {
-    const InputLayerInfo& input = inputs[j];
-    int i = interpreter_inputs[j];
-    TfLiteTensor* t = interpreter->tensor(i);
-    std::vector<int> sizes = input.shape;
-
-    // TODO(ahentz): below we ignore the O-th dimension (number of batches).
-    if (t->type == kTfLiteFloat32) {
-      FillRandomValue<float>(
-          interpreter->typed_tensor<float>(i),
-          std::vector<int>(sizes.begin() + 1, sizes.end()),
-          []() { return static_cast<float>(rand()) / RAND_MAX - 0.5f; });
-    } else if (t->type == kTfLiteUInt8) {
-      FillRandomValue<uint8_t>(
-          interpreter->typed_tensor<uint8_t>(i),
-          std::vector<int>(sizes.begin() + 1, sizes.end()),
-          []() { return static_cast<uint8_t>(rand()) % 255; });
-    } else if (t->type == kTfLiteString) {
-      tflite::DynamicBuffer buffer;
-      FillRandomString(&buffer, sizes, []() {
-        return "we're have some friends over saturday to hang out in the yard";
-      });
-      buffer.WriteToTensor(interpreter->tensor(i));
-    } else {
-      TFLITE_LOG(FATAL) << "Don't know how to populate tensor " << t->name
-                        << " of type " << t->type;
-    }
   }
 }
 
